@@ -23,7 +23,7 @@ import grizzled.slf4j.Logger
 import org.apache.predictionio.controller.{ P2LAlgorithm, Params }
 import org.apache.predictionio.data.storage.{ DataMap, Event, NullModel, PropertyMap }
 import org.apache.predictionio.data.store.LEventStore
-import org.apache.mahout.math.cf.{DownsamplableCrossOccurrenceDataset, SimilarityAnalysis}
+import org.apache.mahout.math.cf.{ DownsamplableCrossOccurrenceDataset, SimilarityAnalysis }
 import org.apache.mahout.sparkbindings.indexeddataset.IndexedDatasetSpark
 import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
@@ -316,8 +316,8 @@ class URAlgorithm(val ap: URAlgorithmParams)
         maxNumInteractions = ap.maxEventsPerEventType.getOrElse(DefaultURAlgoParams.MaxEventsPerEventType))
         .map(_.asInstanceOf[IndexedDatasetSpark])
     } else { // using params per matrix pair, these take the place of eventNames, maxCorrelatorsPerEventType,
-    // and maxEventsPerEventType!
-    val indicators = ap.indicators.get
+      // and maxEventsPerEventType!
+      val indicators = ap.indicators.get
       val iDs = data.actions.map(_._2).toSeq
       val datasets = iDs.zipWithIndex.map {
         case (iD, i) =>
@@ -617,6 +617,13 @@ class URAlgorithm(val ap: URAlgorithmParams)
         render("terms" -> (actionName -> itemIDs) ~ ("boost" -> boost))
     }
 
+    val deBoostedMetadata = getDeboostedMetadata(query)
+    val deboostFields : Seq[JValue] = deBoostedMetadata.map {
+      case BoostableCorrelators(actionName, itemIDs, boost) =>
+        render("bool" -> ("must_not" -> ("terms" -> (actionName -> itemIDs))) ~ ("boost" -> boost))
+    }
+    val shouldFieldWithDeboosts: Seq[JValue] = shouldFields ++ deboostFields
+
     // todo: this should not be sent if there are no rankings, causes 0 scores to be returned as backfill even
     // with no other ranking. Currently the 0 score results are filtered out for no active ranking.
     val shouldScore: JValue = parse(
@@ -630,8 +637,7 @@ class URAlgorithm(val ap: URAlgorithmParams)
         |  }
         |}
         |""".stripMargin)
-
-    shouldFields :+ shouldScore
+     shouldFieldWithDeboosts :+ shouldScore
   }
 
   /** Build must query part */
@@ -674,7 +680,7 @@ class URAlgorithm(val ap: URAlgorithmParams)
     // then get the properties used in must_not clause
     val exclusionFields = query.fields.getOrElse(Seq.empty).filter(_.bias == 0)
     val exclusionProperties: Seq[JValue] = exclusionFields.map {
-      case Field(name, value, bias) =>
+      case Field(name, value, bias, mode) =>
         render(
           "terms" ->
             (name -> value) ~
@@ -806,9 +812,17 @@ class URAlgorithm(val ap: URAlgorithmParams)
   /** get all metadata fields that potentially have boosts (not filters) */
   def getBoostedMetadata(query: Query): Seq[BoostableCorrelators] = {
     val paramsBoostedFields = fields.filter(_.bias < 0f)
-    val queryBoostedFields = query.fields.getOrEmpty.filter(_.bias > 0f)
+    val queryBoostedFields = query.fields.getOrEmpty.filter(_.bias > 0f).filter(x => !x.mode.isDefined || x.mode == Some("boost") )
 
     (queryBoostedFields ++ paramsBoostedFields)
+      .map(field => BoostableCorrelators(field.name, field.values, Some(field.bias)))
+      .distinct // de-dup and favor query fields
+  }
+
+  def getDeboostedMetadata(query: Query): Seq[BoostableCorrelators] = {
+    val queryDeBoostedFields = query.fields.getOrEmpty.filter(_.bias > 0f).filter(x => x.mode == Some("deboost") )
+
+    queryDeBoostedFields
       .map(field => BoostableCorrelators(field.name, field.values, Some(field.bias)))
       .distinct // de-dup and favor query fields
   }
